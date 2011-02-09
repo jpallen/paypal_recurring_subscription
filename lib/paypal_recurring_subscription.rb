@@ -140,7 +140,7 @@ module PaypalRecurringSubscription
   # profile. Be careful if accessing it directly.
   def profile
     if @profile.blank?
-      response = PAYPAL_GATEWAY.get_profile_details(self.paypal_profile_id)
+      response = self.gateway.get_profile_details(self.paypal_profile_id)
       if response.success?
         @profile = response.params
       else
@@ -269,7 +269,7 @@ module PaypalRecurringSubscription
       
       # TODO: What about ProfileStatus::PENDING
       if [ProfileStatus::ACTIVE, ProfileStatus::SUSPENDED].include?(self.profile_status)
-        response = PAYPAL_GATEWAY.cancel_profile(self.paypal_profile_id)
+        response = self.gateway.cancel_profile(self.paypal_profile_id)
         if response.success?
           do_cancel(timeframe, cache_next_payment_due)
         else
