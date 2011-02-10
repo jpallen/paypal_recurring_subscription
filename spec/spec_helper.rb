@@ -26,12 +26,37 @@ PRS = PaypalRecurringSubscription
 class Subscription < ActiveRecord::Base
   include PaypalRecurringSubscription
   
-  def profile_options
-    self.class.profile_options
+  class << self
+    alias :aliased_new :new
   end
   
-  def self.profile_options
-    get_profile_options
+  def initialize(*args)
+    super(*args)
+    self.plan_code ||= 'plan_one'
+  end
+  
+  def profile_options
+    Subscription.profiles[self.plan_code]
+  end
+  
+  def self.profiles
+    {
+      'plan_one' => {
+        :description => 'Plan One',
+        :frequency   => 1,
+        :amount      => 1000
+      },
+      'plan_two' => {
+        :description => 'Plan Two',
+        :frequency   => 1,
+        :amount      => 2000
+      },
+      'quarterly_2000_per_month' => {
+        :description => 'Quarterly $20 per month',
+        :frequency   => 3,
+        :amount      => 3 * 2000
+      }
+    }
   end
 end
 
@@ -59,6 +84,13 @@ end
 def successful_cancel_profile_response_mock
   response_mock = mock('ActiveMerchant::Billing::Response')
   response_mock.stub!('success?').and_return(true)
+  return response_mock
+end
+
+def failed_cancel_profile_response_mock
+  response_mock = mock('ActiveMerchant::Billing::Response')
+  response_mock.stub!('success?').and_return(false)
+  response_mock.stub!('message').and_return('Profile was not cancelled')
   return response_mock
 end
 

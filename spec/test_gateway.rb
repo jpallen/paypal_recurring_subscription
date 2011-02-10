@@ -42,11 +42,22 @@ class TestGateway
     )
   end
   
+  def cancel_profile(profile_id)
+    self.profiles[profile_id]['profile_status'] = 'CancelledProfile'
+    self.profiles[profile_id].delete('next_billing_date')
+    return ActiveMerchant::Billing::Response.new(
+      true,
+      'Profile Cancelled',
+      {}
+    )
+  end
+  
 private
 
   def profile_details_from_options(options)
     options.merge(
-      'profile_status' => 'ActiveProfile'
+      'profile_status'    => 'ActiveProfile',
+      'next_billing_date' => ((options[:start_date] || Time.now) + 1.month).to_s
     )
   end
 end

@@ -6,6 +6,8 @@ class CreateSubscriptions < ActiveRecord::Migration
       t.integer :pending_subscription_id
       t.date    :modify_on
       t.timestamps
+      
+      t.string  :plan_code, :null => false
     end
   end
 

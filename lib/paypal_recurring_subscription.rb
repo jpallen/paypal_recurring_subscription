@@ -119,20 +119,6 @@ module PaypalRecurringSubscription
   # activated.
   def deactivate
   end
-  
-  # Returns all attributes which are set by the user. Used to copy user state of
-  # subscription.
-  def user_attributes
-    filtered_attributes = self.attributes.dup
-    filtered_attributes.delete('paypal_profile_id')
-    filtered_attributes.delete('state')
-    filtered_attributes.delete('modify_on')
-    filtered_attributes.delete('pending_subscription_id')
-    filtered_attributes.delete('id')
-    filtered_attributes.delete('created_at')
-    filtered_attributes.delete('updated_at')
-    return filtered_attributes
-  end
 
   # Returns a hash with all the details stored by Paypal for the profile
   # corresponding to this subscription. This is not the prettiest set of 
@@ -169,6 +155,58 @@ module PaypalRecurringSubscription
     self.profile['profile_status']
   end
   
+  def modify(new_attributes = {})
+    timeframe = new_attributes.delete(:timeframe) || :now
+    
+    if self.state == State::CHANGED
+      # The subscription has already been updated. Cancel the existing pending
+      # subscription since we are going to recreate a new one with the new
+      # attributes.
+      self.pending_subscription.cancel(:timeframe => :now)
+    end
+  
+    if timeframe == :now
+      modify_now(new_attributes)
+    else
+      modify_on_renewal(new_attributes)
+    end
+  end
+  # Cancels a subscription. Takes the following optoins:
+  #   :timeframe - :now or :renewal depending on whether the subscription
+  #   should be deactivated immediately or when the next payment would be due.
+  def cancel(options = {})
+    timeframe = options[:timeframe] || :now
+    
+    # We do nothing for profiles which are already CANCELLED or INACTIVE.
+    if [State::ACTIVE, State::CHANGED, State::PENDING].include?(self.state)
+    
+      if self.state == State::CHANGED
+        # Subscription is due to be changed. This profile has already been
+        # been cancelled so cancel the new subscription profile instead.
+        return self.pending_subscription.cancel(options)
+      end
+      
+      # This is no longer accessible once profile is cancelled
+      cache_next_payment_due = self.next_payment_due
+      
+      # TODO: What about ProfileStatus::PENDING
+      if [ProfileStatus::ACTIVE, ProfileStatus::SUSPENDED].include?(self.profile_status)
+        response = self.gateway.cancel_profile(self.paypal_profile_id)
+        if response.success?
+          do_cancel(timeframe, cache_next_payment_due)
+        else
+          self.errors.add_to_base(response.message)
+          return false
+        end
+      else
+        # Paypal profile is already cancelled for some reason
+        do_cancel(timeframe, cache_next_payment_due)
+      end
+    end
+  end
+  
+private
+  
   def create_profile
     profile_options = self.profile_options.dup
     profile_options[:start_date] = self.start_date.nil? ? Time.now : self.start_date
@@ -187,101 +225,6 @@ module PaypalRecurringSubscription
     end
   end
   
-  def modify(new_attributes = {})
-    timeframe = new_attributes.delete(:timeframe) || :now
-    
-    if self.state == State::CHANGED
-      # The subscription has already been updated. Cancel the existing pending
-      # subscription since we are going to recreate a new one with the new
-      # attributes.
-      self.pending_subscription.cancel(:timeframe => :now)
-    end
-  
-    if timeframe == :now
-      self.modify_now(new_attributes)
-    else
-      self.modify_on_renewal(new_attributes)
-    end
-  end
-  
-  def modify_now(new_attributes = {})
-    # Deactivate this subscription and activate the new one.
-    response = PAYPAL_GATEWAY.cancel_profile(self.paypal_profile_id)
-    if response.success?
-      new_subscription = self.class.new(
-        self.user_attributes.merge(new_attributes).merge({
-          :start_date => Time.now
-        })
-      )
-      # TODO: include initial extra payment, or refund
-      new_subscription.save
-    else
-      raise Subscription::ServerError.new(response.message)
-    end
-  end
-  
-  def modify_on_renewal(new_attributes = {})
-    # Create new subscription to start on renewal
-    new_subscription = self.class.new(
-      self.user_attributes.merge(new_attributes).merge({
-        :start_date => self.next_payment_due,
-        :state      => State::PENDING
-      })
-    )
-    new_subscription.save
-    
-    # Set this subscription to expire on renewal and pass onto the new 
-    # subcription
-    response = PAYPAL_GATEWAY.cancel_profile(self.paypal_profile_id)
-    if response.success?
-      self.state = State::CHANGED
-      self.pending_subscription = new_subscription
-      self.modify_on = self.next_payment_due
-      self.save
-    else
-      raise Subscription::ServerError.new(response.message)
-    end
-  end
-
-  # Cancels a subscription. Takes the following optoins:
-  #   :timeframe - :now or :renewal depending on whether the subscription
-  #   should be deactivated immediately or when the next payment would be due.
-  def cancel(options = {})
-    timeframe = options[:timeframe] || :renewal
-    
-    # We do nothing for profiles which are already CANCELLED or INACTIVE.
-    if [State::ACTIVE, State::CHANGED, State::PENDING].include?(self.state)
-    
-      if self.state == State::CHANGED
-        # Subscription is due to be changed. This profile has already been
-        # been cancelled so cancel the new subscription profile instead.
-        return self.pending_subscription.cancel(:timeframe => :now)
-      end
-      
-      if self.state == State::PENDING
-        # Pending subscriptions haven't started, so we cancel them 
-        # immediately.
-        timeframe = :now
-      end
-      
-      # This is no longer accessible once profile is cancelled
-      cache_next_payment_due = self.next_payment_due
-      
-      # TODO: What about ProfileStatus::PENDING
-      if [ProfileStatus::ACTIVE, ProfileStatus::SUSPENDED].include?(self.profile_status)
-        response = self.gateway.cancel_profile(self.paypal_profile_id)
-        if response.success?
-          do_cancel(timeframe, cache_next_payment_due)
-        else
-          raise Subscription::ServerError.new(response.message)
-        end
-      else
-        # Profile is already cancelled for some reason
-        do_cancel(timeframe, cache_next_payment_due)
-      end
-    end
-  end
-  
   def do_cancel(timeframe, cache_next_payment_due)
     if timeframe == :now
       self.state = State::INACTIVE
@@ -291,6 +234,85 @@ module PaypalRecurringSubscription
       self.modify_on = cache_next_payment_due
     end
     return self.save
+  end
+  
+  def modify_now(new_attributes = {})
+    next_payment_date = self.next_payment_due
+    
+    # Deactivate this subscription and activate the new one.
+    response = self.gateway.cancel_profile(self.paypal_profile_id)
+    if response.success?
+      
+      new_subscription = self.class.new(
+        user_attributes.merge(new_attributes).merge({
+          :start_date => next_payment_date
+        })
+      )
+
+      seconds_left = (next_payment_date - Time.now).to_i
+      seconds_left = 0 unless seconds_left > 0
+      
+      # We round to get the number of days left. This seems fairest for
+      # everyone
+      days_left = (seconds_left / 60.0 / 60.0 / 24.0).round
+      
+      current_subscription_length = self.profile_options[:frequency].months.to_i / 60.0 / 60.0 / 24.0
+      refund_due = ((days_left / current_subscription_length.to_f) * self.profile_options[:amount]).to_i
+      
+      new_subscription_length = new_subscription.profile_options[:frequency].months.to_i / 60.0 / 60.0 / 24.0
+      extra_due = ((days_left / new_subscription_length.to_f) * new_subscription.profile_options[:amount]).to_i
+      
+      difference = extra_due - refund_due
+      if difference >= 0
+        new_subscription.initial_amount = difference
+      else
+        raise NotImplementedError, "can't issue refunds"
+      end
+      
+      self.deactivate
+      self.state = State::INACTIVE
+      
+      self.save and new_subscription.save
+    else
+      raise Subscription::ServerError.new(response.message)
+    end
+  end
+  
+  def modify_on_renewal(new_attributes = {})
+    # Create new subscription to start on renewal
+    new_subscription = self.class.new(
+      user_attributes.merge(new_attributes).merge({
+        :start_date => self.next_payment_due,
+        :state      => State::PENDING
+      })
+    )
+    new_subscription.save
+    
+    # Set this subscription to expire on renewal and pass onto the new 
+    # subcription
+    response = self.gateway.cancel_profile(self.paypal_profile_id)
+    if response.success?
+      self.state = State::CHANGED
+      self.pending_subscription = new_subscription
+      self.modify_on = self.next_payment_due
+      self.save
+    else
+      raise Subscription::ServerError.new(response.message)
+    end
+  end
+  
+  # Returns all attributes which are set by the user. Used to copy user state of
+  # subscription.
+  def user_attributes
+    filtered_attributes = self.attributes.dup
+    filtered_attributes.delete('paypal_profile_id')
+    filtered_attributes.delete('state')
+    filtered_attributes.delete('modify_on')
+    filtered_attributes.delete('pending_subscription_id')
+    filtered_attributes.delete('id')
+    filtered_attributes.delete('created_at')
+    filtered_attributes.delete('updated_at')
+    return filtered_attributes
   end
   
   def ensure_deactivated
