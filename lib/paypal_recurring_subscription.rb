@@ -171,6 +171,7 @@ module PaypalRecurringSubscription
       modify_on_renewal(new_attributes)
     end
   end
+  
   # Cancels a subscription. Takes the following optoins:
   #   :timeframe - :now or :renewal depending on whether the subscription
   #   should be deactivated immediately or when the next payment would be due.
@@ -189,18 +190,20 @@ module PaypalRecurringSubscription
       # This is no longer accessible once profile is cancelled
       cache_next_payment_due = self.next_payment_due
       
+      # TODO: Issue refund for immediate cancellations (not for PENDING 
+      # subscriptions though)
       # TODO: What about ProfileStatus::PENDING
       if [ProfileStatus::ACTIVE, ProfileStatus::SUSPENDED].include?(self.profile_status)
         response = self.gateway.cancel_profile(self.paypal_profile_id)
         if response.success?
-          do_cancel(timeframe, cache_next_payment_due)
+          save_as_cancelled(timeframe, cache_next_payment_due)
         else
           self.errors.add_to_base(response.message)
           return false
         end
       else
         # Paypal profile is already cancelled for some reason
-        do_cancel(timeframe, cache_next_payment_due)
+        save_as_cancelled(timeframe, cache_next_payment_due)
       end
     end
   end
@@ -218,14 +221,14 @@ private
     )
     if response.success?
       self.paypal_profile_id = response.params['profile_id']
-      return true # Continue with save
+      return true
     else
       self.errors.add_to_base(response.message)
-      return false # Abort creation
+      return false
     end
   end
   
-  def do_cancel(timeframe, cache_next_payment_due)
+  def save_as_cancelled(timeframe, cache_next_payment_due)
     if timeframe == :now
       self.state = State::INACTIVE
       self.deactivate

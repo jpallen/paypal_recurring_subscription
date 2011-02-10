@@ -109,6 +109,10 @@ describe Subscription, 'modification' do
     end
     
     it 'should refund an amount when downgrading'
+    
+    it 'should fail gracefully'
+    
+    it 'should error if left in an inconsistent state'
   end
   
   describe 'with :timeframe => :renewal' do
@@ -142,6 +146,10 @@ describe Subscription, 'modification' do
       @s.state.should eql PRS::State::CHANGED
       @s.modify_on.should eql next_payment_date
     end
+    
+    it 'should fail gracefully'
+    
+    it 'should error if left in an inconsistent state'
   end
 end
 
@@ -186,7 +194,13 @@ describe Subscription, 'on cancellation' do
     @s.cancel
   end
   
-  it 'should cancel the pending subscription'
+  it 'should cancel the pending subscription' do
+    @s.modify(:token => @tok, :plan_code => 'plan_two', :timeframe => :renewal)
+    
+    @s.should_not_receive(:cancel_profile)
+    @s.pending_subscription.should_receive(:cancel)
+    @s.cancel
+  end
 end
 
 describe Subscription, 'without gateway' do
