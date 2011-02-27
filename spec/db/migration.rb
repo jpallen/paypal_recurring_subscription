@@ -8,6 +8,7 @@ class CreateSubscriptions < ActiveRecord::Migration
       t.timestamps
       
       t.string  :plan_code, :null => false
+      t.boolean :active
     end
   end
 

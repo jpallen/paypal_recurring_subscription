@@ -15,7 +15,7 @@ module PaypalRecurringSubscription
 	def self.included(klass)
 	  klass.extend(ClassMethods)
 	  
-    klass.serialize     :info
+    klass.serialize :info
     klass.send('attr_accessor', :token, :initial_amount, :start_date)
     
     klass.belongs_to(
@@ -55,6 +55,29 @@ module PaypalRecurringSubscription
   	          "ActiveMerchant::Billing::PaypalExpressRecurringGateway"
   	  end
   	  return @gateway
+  	end
+  	
+  	def process_modifications
+  	  for subscription in self.find(
+  	                        :all, 
+  	                        :conditions => [
+  	                          'modify_on < ? AND (state = ? OR state = ?)', 
+                	            Time.now, State::CANCELLED, State::CHANGED
+                	          ])
+  	    if subscription.state == State::CANCELLED
+  	      subscription.state = State::INACTIVE
+  	      subscription.deactivate
+  	      subscription.save
+  	    elsif subscription.state == State::CHANGED
+  	      subscription.state = State::INACTIVE
+  	      subscription.deactivate
+  	      subscription.save
+  	      
+  	      subscription.pending_subscription.state = State::ACTIVE
+  	      subscription.pending_subscription.activate
+  	      subscription.pending_subscription.save
+  	    end
+  	  end
   	end
   end
   
@@ -156,7 +179,7 @@ module PaypalRecurringSubscription
   end
   
   def modify(new_attributes = {})
-    timeframe = new_attributes.delete(:timeframe) || :now
+    timeframe = new_attributes.delete(:timeframe) || :renewal
     
     if self.state == State::CHANGED
       # The subscription has already been updated. Cancel the existing pending
@@ -176,7 +199,7 @@ module PaypalRecurringSubscription
   #   :timeframe - :now or :renewal depending on whether the subscription
   #   should be deactivated immediately or when the next payment would be due.
   def cancel(options = {})
-    timeframe = options[:timeframe] || :now
+    timeframe = options[:timeframe] || :renewal
     
     # We do nothing for profiles which are already CANCELLED or INACTIVE.
     if [State::ACTIVE, State::CHANGED, State::PENDING].include?(self.state)

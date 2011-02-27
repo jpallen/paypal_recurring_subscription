@@ -58,6 +58,14 @@ class Subscription < ActiveRecord::Base
       }
     }
   end
+  
+  def activate
+    self.active = true
+  end
+  
+  def deactivate
+    self.active = false
+  end
 end
 
 def create_gateway_mock(options = {})

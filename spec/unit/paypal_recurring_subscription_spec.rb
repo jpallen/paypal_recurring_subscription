@@ -36,6 +36,11 @@ describe Subscription, 'on creation' do
     @s.save.should be_true
   end
   
+  it 'should activate the subscription' do
+    @s.should_receive(:activate)
+    @s.save
+  end
+  
   it "should not be saved if the create profile request was not successful" do
     @gateway.should_receive(:create_profile).and_return(
       @resp = failed_create_profile_response_mock
@@ -69,21 +74,25 @@ describe Subscription, 'modification' do
         @resp = successful_create_profile_response_mock
       )
       
-      @s.modify(:token => TestGateway.get_token, :plan_code => 'plan_two')
+      @s.modify(:token => TestGateway.get_token, :plan_code => 'plan_two', :timeframe => :now)
       
       @new_s = Subscription.find(:all).reject{|s| s == @s}.first
       @new_s.paypal_profile_id.should eql @resp.params['profile_id']
-      @new_s.state.should eql PRS::State::ACTIVE
       @new_s.plan_code.should eql 'plan_two'
     end
     
     it 'should deactivate the old subscription' do
-      @s.should_receive(:deactivate)
-      @s.modify(:token => @tok, :plan_code => 'plan_two', :timeframe => :now)
+      @s.modify(:token => TestGateway.get_token, :plan_code => 'plan_two', :timeframe => :now)
       @s.state.should eql PRS::State::INACTIVE
+      @s.should_not be_active
     end
     
-    it 'should activate the new subscription'
+    it 'should activate the new subscription' do
+      @s.modify(:token => TestGateway.get_token, :plan_code => 'plan_two', :timeframe => :now)
+      @new_s = Subscription.find(:all).reject{|s| s == @s}.first
+      @new_s.state.should eql PRS::State::ACTIVE
+      @new_s.should be_active
+    end
     
     it 'should add an initial amount when upgrading' do
       Timecop.travel(@s.next_payment_due - 10.days)
@@ -121,7 +130,7 @@ describe Subscription, 'modification' do
         @resp = successful_cancel_profile_response_mock
       )
       
-      @s.modify(:token => @tok, :plan_code => 'plan_two', :timeframe => :renewal)
+      @s.modify(:token => TestGateway.get_token, :plan_code => 'plan_two', :timeframe => :renewal)
     end
     
     it 'should create a new subscription and profile' do
@@ -142,7 +151,7 @@ describe Subscription, 'modification' do
     
     it 'should mark the old subscription as changed' do
       next_payment_date = @s.next_payment_due
-      @s.modify(:token => @tok, :plan_code => 'plan_two', :timeframe => :renewal)
+      @s.modify(:token => TestGateway.get_token, :plan_code => 'plan_two', :timeframe => :renewal)
       @s.state.should eql PRS::State::CHANGED
       @s.modify_on.should eql next_payment_date
     end
@@ -209,5 +218,45 @@ describe Subscription, 'without gateway' do
     lambda {
       Subscription.gateway
     }.should raise_error(PRS::GatewayNotConfigured)
+  end
+end
+
+describe Subscription, 'process modifications' do
+  before do
+    Timecop.freeze
+    Subscription.gateway = @gateway = TestGateway.new
+    @s = Subscription.create
+  end
+
+  it 'should deactivate cancelled subscriptions' do
+    @s.cancel(:timeframe => :renewal)
+    @s.state.should eql PRS::State::CANCELLED
+    
+    Timecop.travel(@s.modify_on + 10.seconds)
+    Subscription.process_modifications
+    @s.reload.state.should eql PRS::State::INACTIVE
+    @s.should_not be_active
+  end
+  
+  it 'should convert pending subscriptions' do
+    @s.modify(:token => TestGateway.get_token, :plan_code => 'plan_two', :timeframe => :renewal)
+    @s.state.should eql PRS::State::CHANGED
+    
+    Timecop.travel(@s.modify_on + 10.seconds)
+    Subscription.process_modifications
+    @s.reload.state.should eql PRS::State::INACTIVE
+    @s.should_not be_active
+    @s.pending_subscription.state.should eql PRS::State::ACTIVE
+    @s.pending_subscription.should be_active
+  end
+
+  it 'should not modify subscriptions with modify_on date in the future' do
+    @s.cancel(:timeframe => :renewal)
+    @s.state.should eql PRS::State::CANCELLED
+    
+    Timecop.travel(@s.modify_on - 10.seconds)
+    Subscription.process_modifications
+    @s.reload.state.should eql PRS::State::CANCELLED
+    @s.should be_active
   end
 end
